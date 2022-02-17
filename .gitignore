@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Folders
+signal generator data/
+artifact data/
+Data
+SSVEP Neural Generative Models/
