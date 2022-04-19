@@ -68,7 +68,7 @@ def remove_eyeblinks(use_gpu, eeg_raw, srate, window_length = 125, n_clusters = 
     # return eeg_clean, eeg_artifact
 
 #%% Remove Eyeblinks - Multiple channels using CPU
-def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01):    
+def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, svd_method='sci'):    
     """
         This function removes eyeblink artifacts from EEG data using an SSA approach implementation was adapted from
         [Maddirala & Veluvolu 2021] 
@@ -87,6 +87,10 @@ def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
             Fractal dimension threshold 
         ssa_threshold: floar, optional
             Singular Spectrum Analysis threshold
+        svd_method: str, optional
+            Method to use for SVD calculation
+            'sci': Scipy (default)
+            'np': Numpy
 
     Returns
     -------
@@ -145,71 +149,11 @@ def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
     eeg_artifact = np.zeros_like(eeg_raw)       # EEG + Artifact (before SSA)
     artifact = np.zeros_like(eeg_raw)           # Artifact signal (after SSA)
 
+    #%% Run Artifact removal in each channel
     for channel in range(n_channels):
-        artifact[channel,:] = single_remove_eyeblinks(eeg_raw=eeg_raw[channel,:], idx_mat=idx_mat)
+        artifact[channel,:] = single_remove_eyeblinks(eeg_raw=eeg_raw[channel,:], idx_mat=idx_mat, svd_method=svd_method)
 
     eeg_clean = eeg_raw - artifact
-    
-    # for channel in range(n_channels):
-    #     eeg_embedded = eeg_raw[channel, idx_mat]
-        
-    #     #%% Calculate features from embedded matrix
-    #     f1 = np.sum(eeg_embedded**2, axis=0)            # Energy [V^2]
-    #     f2 = np.sqrt(np.var(np.diff(eeg_embedded,axis=0),axis=0) / np.var(eeg_embedded,axis=0)) # H_mobility
-    #     f3 = stats.kurtosis(eeg_embedded, axis=0)       # Kurtosis
-    #     f4 = eeg_embedded.max(0) - eeg_embedded.min(0)  # Range
-    #     eeg_features = np.array((f1,f2,f3,f4))
-
-    #     #%% Perform Kmeans classification
-    #     kmeans = KMeans(n_clusters=n_clusters).fit(eeg_features.T)
-
-    #     # - Preallocate variables
-    #     eeg_component = np.zeros((n_clusters, N))
-
-    #     #%% Compute decomposed matrices
-    #     for cluster in range(n_clusters):
-    #         eeg_decomposed = np.zeros((M,K))    # Temporary matrix to store the decomposed EEG for each cluster [M,K] 
-            
-    #         # - Determine columns to copy based on the kmeans label
-    #         copy_index = (kmeans.labels_==cluster) 
-    #         eeg_decomposed[:,copy_index] = eeg_embedded[:,copy_index]
-                    
-    #         # Reconstruct signal from antidiagonal averages
-    #         eeg_component[cluster, :] = mean_antidiag(eeg_decomposed)
-            
-    #     #%% Calculate Fractal Dimension (FD)        
-    #     # - Normalize EEG to unit square
-    #     x_norm = np.repeat(np.reshape(np.linspace(0, 1, N),[-1,1]),n_clusters,axis=1)
-    #     y_num = eeg_component - matlib.repmat(np.amin(eeg_component, axis=1, keepdims=True), 1, N)
-    #     y_den = matlib.repmat(np.amax(eeg_component, axis=1, keepdims=True) - np.amin(eeg_component, axis=1, keepdims=True), 1, N)
-    #     y_norm = np.divide(y_num, y_den).T
-    #     z = np.array([x_norm, y_norm]) # 3D Matrix to store x_norm and y_norm [sample x [x,y] x n_cluster]
-
-    #     # - Calculate fractal dimension
-    #     # l = np.sum(np.sum(np.abs(np.diff(z, axis=1)), axis=0), axis=0)  # Calculate length of signal (l1-norm for each n_cluster) [A.U.]
-    #     l = np.sum(np.sqrt(np.sum(np.square(np.diff(z, axis=1)), axis=0)), axis=0)  # Calculate length of signal (l2-norm for each n_cluster) [A.U.]
-    #     fd = 1 + (np.log(l) / np.log(2*(N-1)))
-
-    #     # - Binary artifact creation
-    #     fd_mask = fd < fd_threshold                                                 # Apply threshold to FD to determine artifact components
-    #     eeg_mask = np.sum(eeg_component[fd_mask,:],0)                               # Vector with artifact points != 0
-    #     eeg_artifact[channel,:] = eeg_raw[channel,:] * (eeg_mask != 0).astype(int)  # Multiply mask with original to get eeg_artifact with correct values [V]
-
-    #     #%% Singular Spectrum Analysis
-    #     # - Singular Value Decomposition
-    #     artifact_embedded = eeg_artifact[channel,idx_mat]   # Create multivariate matrix for each channel
-    #     [u, s, vh] = np.linalg.svd(artifact_embedded)       # Calculate SVD for multivariate matrix
-
-    #     # - Determine number of groups
-    #     eigen_ratio = (s / np.sum(s)) > ssa_threshold                                       # Keep only eigenvectors > ssa_threshold
-    #     vh_sub = vh[0:np.size(s)]                                                           # Select subset of unitary arrays
-    #     artifact_sub = u[:,eigen_ratio] @ np.diag(s[eigen_ratio]) @ vh_sub[eigen_ratio,:]   # Artifact with subset of eigenvectors
-        
-    #     # Reconstruct signals from antidiagonal averages
-    #     artifact[channel,:] = mean_antidiag(artifact_sub)
-        
-    # #%% Subtract artifact signal from original to get clean_eeg
-    # eeg_clean = eeg_raw - artifact
     
     #%% Return data in original shape
     if data_reshape:
@@ -368,9 +312,9 @@ def remove_eyeblinks_gpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
     else:
         return cp.asnumpy(eeg_clean), cp.asnumpy(artifact)
 
-def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01):
+def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, svd_method='sci'):
     """
-        This function implements the artifact removal described in [Maddirala & Veluvolu 2021]
+        This function implements the artifact removal described in [Maddirala & Veluvolu 2021].
 
     Parameters
     ----------
@@ -382,8 +326,12 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
             Number of clusters to use in the kmeans classifier
         fd_threshold: float, optional
             Fractal dimension threshold 
-        ssa_threshold: floar, optional
+        ssa_threshold: float, optional
             Singular Spectrum Analysis threshold
+        svd_method: str, optional
+            Method to use for SVD calculation
+            'sci': Scipy (default)
+            'np': Numpy
 
     Returns
     -------
@@ -404,7 +352,7 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     eeg_features = np.array((f1,f2,f3,f4))
 
     #%% Perform Kmeans classification
-    kmeans = KMeans(n_clusters=n_clusters, max_iter=3000).fit(eeg_features.T)
+    kmeans = KMeans(n_clusters=n_clusters).fit(eeg_features.T)
 
     # - Preallocate variables
     eeg_component = np.zeros((n_clusters, N))
@@ -441,7 +389,16 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     #%% Singular Spectrum Analysis
     # - Singular Value Decomposition
     artifact_embedded = eeg_artifact[idx_mat]       # Create multivariate matrix for each channel
-    [u, s, vh] = np.linalg.svd(artifact_embedded)   # Calculate SVD for multivariate matrix
+    
+    # - Use scipy or numpy for SVD calculation
+    if svd_method == 'sci':
+        [u, s, vh] = linalg.svd(artifact_embedded)
+        pass
+    elif svd_method == 'np':
+        [u, s, vh] = np.linalg.svd(artifact_embedded)
+    else:
+        print("wrong SVD method selected")
+        return None
 
     # - Determine number of groups
     eigen_ratio = (s / np.sum(s)) > ssa_threshold                                       # Keep only eigenvectors > ssa_threshold
@@ -469,7 +426,7 @@ def mean_antidiag(input_mat):
                 1D vector containing the mean values of the antidiagonal components
     """
 
-    input_shape = np.shape(input_mat)   # Shape of input matrix
+    input_shape = input_mat.shape       # Shape of input matrix
     input_flip = np.fliplr(input_mat)   # Flip input matrix from left to right
     average_vect = np.zeros(np.sum(input_shape)-1)  # Preallocate vector with average values
 
@@ -481,11 +438,25 @@ def mean_antidiag(input_mat):
     # Calculate mean across diagonals
     # - Organize values from end to start to get right order
     for i_diag, k_diag in enumerate(range(-input_shape[0]+1,input_shape[1])):
-        average_vect[-i_diag] = np.mean(np.diag(input_flip, k=k_diag))
-    
+        average_vect[-i_diag-1] = input_flip.diagonal(offset=k_diag).mean()   # This is the line that needs to change
     return average_vect
 
 def mean_antidiag_gpu(input_mat_cp, N):
+    """
+    This function returns the mean of the antidiagonal components of a matrix, implented for GPU computation with CUPY
+
+    Parameters
+    ----------
+        input_mat: array_like
+            Matrix with shape [i,k] for which the mean of the antidiagonal components will be calculated.\n
+            Must be a 2D matrix.
+
+    Returns
+    -------
+        average_vect: array_like
+            1D vector containing the mean values of the antidiagonal components
+    """
+
     input_shape = cp.shape(input_mat_cp)   # Shape of input matrix
     input_flip = cp.fliplr(input_mat_cp)   # Flip input matrix from left to right
     average_vect = cp.zeros(N)   # Preallocate vector with average values
@@ -498,6 +469,6 @@ def mean_antidiag_gpu(input_mat_cp, N):
     # Calculate mean across diagonals
     # - Organize values from end to start to get right order
     for i_diag, k_diag in enumerate(range(-input_shape[0]+1,input_shape[1])):
-        average_vect[-i_diag] = cp.mean(cp.diag(input_flip, k=k_diag))
+        average_vect[-i_diag-1] = cp.mean(cp.diag(input_flip, k=k_diag))
 
     return average_vect
