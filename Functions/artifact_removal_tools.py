@@ -68,7 +68,7 @@ def remove_eyeblinks(use_gpu, eeg_raw, srate, window_length = 125, n_clusters = 
     # return eeg_clean, eeg_artifact
 
 #%% Remove Eyeblinks - Multiple channels using CPU
-def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, svd_method='sci'):    
+def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, svd_method='sci', antidiag_method='mask'):    
     """
         This function removes eyeblink artifacts from EEG data using an SSA approach implementation was adapted from
         [Maddirala & Veluvolu 2021] 
@@ -91,6 +91,10 @@ def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
             Method to use for SVD calculation
             'sci': Scipy (default)
             'np': Numpy
+        method: str
+            Method used to calculate average of antidiagonals
+            'simple': Iterate through each antidiagonal and calculate mean value
+            'mask': Compute matrix with antidiagonals and boolean mask, calculate mean of matrix
 
     Returns
     -------
@@ -151,7 +155,7 @@ def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
 
     #%% Run Artifact removal in each channel
     for channel in range(n_channels):
-        artifact[channel,:] = single_remove_eyeblinks(eeg_raw=eeg_raw[channel,:], idx_mat=idx_mat, svd_method=svd_method)
+        artifact[channel,:] = single_remove_eyeblinks(eeg_raw=eeg_raw[channel,:], idx_mat=idx_mat, svd_method=svd_method, antidiag_method=antidiag_method)
 
     eeg_clean = eeg_raw - artifact
     
@@ -312,7 +316,7 @@ def remove_eyeblinks_gpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
     else:
         return cp.asnumpy(eeg_clean), cp.asnumpy(artifact)
 
-def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, svd_method='sci'):
+def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, svd_method = 'sci', antidiag_method = 'mask'):
     """
         This function implements the artifact removal described in [Maddirala & Veluvolu 2021].
 
@@ -330,8 +334,12 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
             Singular Spectrum Analysis threshold
         svd_method: str, optional
             Method to use for SVD calculation
-            'sci': Scipy (default)
+            'sci': Scipy
             'np': Numpy
+        method: str
+            Method used to calculate average of antidiagonals
+            'simple': Iterate through each antidiagonal and calculate mean value
+            'mask': Compute matrix with antidiagonals and boolean mask, calculate mean of matrix
 
     Returns
     -------
@@ -345,9 +353,13 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     K = np.size(idx_mat,1)  # Number of columns in index matrix [N]
     
     #%% Calculate features from embedded matrix
-    f1 = np.sum(eeg_embedded**2, axis=0)            # Energy [V^2]
-    f2 = np.sqrt(np.var(np.diff(eeg_embedded,axis=0),axis=0) / np.var(eeg_embedded,axis=0)) # H_mobility
+    f1 = (eeg_embedded**2).sum(axis=0)              # Energy [V^2]
+    f2 = np.sqrt((np.diff(eeg_embedded,axis=0)).var(axis=0)) / eeg_embedded.var(axis=0) # H_mobility
     f3 = stats.kurtosis(eeg_embedded, axis=0)       # Kurtosis
+
+    # f1 = np.sum(eeg_embedded**2, axis=0)            # Energy [V^2]
+    # f2 = np.sqrt(np.var(np.diff(eeg_embedded,axis=0),axis=0) / np.var(eeg_embedded,axis=0)) # H_mobility
+    # f3 = stats.kurtosis(eeg_embedded, axis=0)       # Kurtosis
     f4 = eeg_embedded.max(0) - eeg_embedded.min(0)  # Range
     eeg_features = np.array((f1,f2,f3,f4))
 
@@ -366,7 +378,7 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
         eeg_decomposed[:,copy_index] = eeg_embedded[:,copy_index]
                 
         # Reconstruct signal from antidiagonal averages
-        eeg_component[cluster, :] = mean_antidiag(eeg_decomposed)
+        eeg_component[cluster, :] = mean_antidiag(eeg_decomposed, antidiag_method)
         
     #%% Calculate Fractal Dimension (FD)        
     # - Normalize EEG to unit square
@@ -392,7 +404,7 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     
     # - Use scipy or numpy for SVD calculation
     if svd_method == 'sci':
-        [u, s, vh] = linalg.svd(artifact_embedded)
+        [u, s, vh] = linalg.svd(artifact_embedded, full_matrices=False)
         pass
     elif svd_method == 'np':
         [u, s, vh] = np.linalg.svd(artifact_embedded)
@@ -401,16 +413,16 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
         return None
 
     # - Determine number of groups
-    eigen_ratio = (s / np.sum(s)) > ssa_threshold                                       # Keep only eigenvectors > ssa_threshold
-    vh_sub = vh[0:np.size(s)]                                                           # Select subset of unitary arrays
+    eigen_ratio = (s / s.sum()) > ssa_threshold   # Keep only eigenvectors > ssa_threshold
+    vh_sub = vh[0:s.size]                           # Select subset of unitary arrays
     artifact_sub = u[:,eigen_ratio] @ np.diag(s[eigen_ratio]) @ vh_sub[eigen_ratio,:]   # Artifact with subset of eigenvectors
     
     # Reconstruct signals from antidiagonal averages
-    artifact = mean_antidiag(artifact_sub)
+    artifact = mean_antidiag(artifact_sub, antidiag_method)
 
     return artifact
 
-def mean_antidiag(input_mat):
+def mean_antidiag(input_mat, method):
     """
         This function returns the mean of the antidiagonal components of a matrix
 
@@ -419,6 +431,10 @@ def mean_antidiag(input_mat):
             input_mat: array_like
                 Matrix with shape [i,k] for which the mean of the antidiagonal components will be calculated.\n
                 Must be a 2D matrix.
+            method: str
+                Method used to calculate average of antidiagonals
+                'simple': Iterate through each antidiagonal and calculate mean value
+                'mask': Compute matrix with antidiagonals and boolean mask, calculate mean of matrix
 
         Returns
         -------
@@ -428,7 +444,7 @@ def mean_antidiag(input_mat):
 
     input_shape = input_mat.shape       # Shape of input matrix
     input_flip = np.fliplr(input_mat)   # Flip input matrix from left to right
-    average_vect = np.zeros(np.sum(input_shape)-1)  # Preallocate vector with average values
+    n = np.sum(input_shape) - 1             # Number of samples of resulting vector 
 
     # Make sure that input matrix is 2D
     if len(input_shape)!=2:
@@ -436,9 +452,29 @@ def mean_antidiag(input_mat):
         return None
 
     # Calculate mean across diagonals
-    # - Organize values from end to start to get right order
-    for i_diag, k_diag in enumerate(range(-input_shape[0]+1,input_shape[1])):
-        average_vect[-i_diag-1] = input_flip.diagonal(offset=k_diag).mean()   # This is the line that needs to change
+    if method == 'simple':
+        average_vect = np.zeros(n)  # Preallocate vector with average values
+
+        for i_diag, k_diag in enumerate(range(-input_shape[0]+1,input_shape[1])):
+            average_vect[-i_diag-1] = input_flip.diagonal(offset=k_diag).mean() # Organize values from end to start to get right order
+
+    elif method == 'mask':
+        max_diag = (input_flip.diagonal(offset=0)).size # Size of longest diagonal
+        diag_mat = np.zeros((max_diag,n))               # Empty matrix to store antidiagonal values
+        mask_mat = np.zeros((max_diag,n))               # Empty matrix to store mask values
+
+        for i, k_diag in enumerate(range(-input_shape[0]+1, input_shape[1])):
+            diag_vals = input_flip.diagonal(offset=k_diag)  # Values of the k^th diagonal
+            n_diag = diag_vals.size                         # Length of values of the k^th diagonal
+            diag_mat[0:n_diag,i] = diag_vals
+            mask_mat[0:n_diag,i] = 1
+
+        average_vect = np.flip(diag_mat.mean(axis=0, where=mask_mat.astype(bool)))
+
+    else:
+        print('Antidiagonal method not available')
+        return None
+
     return average_vect
 
 def mean_antidiag_gpu(input_mat_cp, N):
