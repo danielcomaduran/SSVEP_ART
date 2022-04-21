@@ -149,8 +149,6 @@ def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
 
     #%% Decomposed 
     # - Preallocate variables
-    eeg_component = np.zeros((n_clusters, N))   # Temporary matrix of n_clusters EEG components reconstructed from eeg_decomposed
-    eeg_artifact = np.zeros_like(eeg_raw)       # EEG + Artifact (before SSA)
     artifact = np.zeros_like(eeg_raw)           # Artifact signal (after SSA)
 
     #%% Run Artifact removal in each channel
@@ -356,10 +354,6 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     f1 = (eeg_embedded**2).sum(axis=0)              # Energy [V^2]
     f2 = np.sqrt((np.diff(eeg_embedded,axis=0)).var(axis=0)) / eeg_embedded.var(axis=0) # H_mobility
     f3 = stats.kurtosis(eeg_embedded, axis=0)       # Kurtosis
-
-    # f1 = np.sum(eeg_embedded**2, axis=0)            # Energy [V^2]
-    # f2 = np.sqrt(np.var(np.diff(eeg_embedded,axis=0),axis=0) / np.var(eeg_embedded,axis=0)) # H_mobility
-    # f3 = stats.kurtosis(eeg_embedded, axis=0)       # Kurtosis
     f4 = eeg_embedded.max(0) - eeg_embedded.min(0)  # Range
     eeg_features = np.array((f1,f2,f3,f4))
 
