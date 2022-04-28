@@ -6,27 +6,15 @@
 """
 
 ## Import libraries
-from copy import copy
 import os
-import time
-# from pyrsistent import T
 import numpy as np
-import matplotlib.pyplot as plt
 import scipy.stats as stats
-import scipy.signal as signal
 import scipy.linalg as linalg
-import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from numpy import matlib as matlib, ndarray
 import concurrent.futures as cf
-# import Functions.multithread_eye_blink
-# from Functions import multithread_eye_blink as multithread_eye_blink
-# from pyts.decomposition import SingularSpectrumAnalysis
-import torch
-# from kmeans_pytorch import kmeans
 from Functions import kmeans as kmeans
 import cupy as cp
-# import cupy.linalg.svd as cupy_svd
 
 def remove_eyeblinks(use_gpu, eeg_raw, srate, window_length = 125, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01):
     """
