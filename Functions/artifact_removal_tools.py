@@ -18,6 +18,9 @@ import scipy.linalg as linalg
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from numpy import matlib as matlib, ndarray
+import concurrent.futures as cf
+# import Functions.multithread_eye_blink
+# from Functions import multithread_eye_blink as multithread_eye_blink
 # from pyts.decomposition import SingularSpectrumAnalysis
 import torch
 # from kmeans_pytorch import kmeans
@@ -68,7 +71,7 @@ def remove_eyeblinks(use_gpu, eeg_raw, srate, window_length = 125, n_clusters = 
     # return eeg_clean, eeg_artifact
 
 #%% Remove Eyeblinks - Multiple channels using CPU
-def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, svd_method='sci', antidiag_method='mask'):    
+def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, svd_method='sci', antidiag_method='mask', enable_multithread=False):    
     """
         This function removes eyeblink artifacts from EEG data using an SSA approach implementation was adapted from
         [Maddirala & Veluvolu 2021] 
@@ -91,10 +94,12 @@ def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
             Method to use for SVD calculation
             'sci': Scipy (default)
             'np': Numpy
-        method: str
+        antidiag_method: str
             Method used to calculate average of antidiagonals
             'simple': Iterate through each antidiagonal and calculate mean value
             'mask': Compute matrix with antidiagonals and boolean mask, calculate mean of matrix
+        enable_multithread: bool
+            Enable multithreading processing in CPU. Uses half of the available logical processors
 
     Returns
     -------
@@ -152,8 +157,14 @@ def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
     artifact = np.zeros_like(eeg_raw)           # Artifact signal (after SSA)
 
     #%% Run Artifact removal in each channel
-    for channel in range(n_channels):
-        artifact[channel,:] = single_remove_eyeblinks(eeg_raw=eeg_raw[channel,:], idx_mat=idx_mat, svd_method=svd_method, antidiag_method=antidiag_method)
+    # - Multithreaded enabled
+    if enable_multithread:
+        artifact = multithread(eeg_raw, idx_mat, n_clusters, fd_threshold, ssa_threshold, svd_method, antidiag_method)
+
+    # - Multithread disabled
+    else:
+        for channel in range(n_channels):
+            artifact[channel,:] = single_remove_eyeblinks(eeg_raw=eeg_raw[channel,:], idx_mat=idx_mat, svd_method=svd_method, antidiag_method=antidiag_method)
 
     eeg_clean = eeg_raw - artifact
     
@@ -336,8 +347,8 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
             'np': Numpy
         method: str
             Method used to calculate average of antidiagonals
-            'simple': Iterate through each antidiagonal and calculate mean value
             'mask': Compute matrix with antidiagonals and boolean mask, calculate mean of matrix
+            'simple': Iterate through each antidiagonal and calculate mean value            
 
     Returns
     -------
@@ -345,7 +356,10 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
             Single artifacts vector found in EEG signal
     """
 
+    #%% Create EEG embedded matrix from single row of EEG
     eeg_embedded = eeg_raw[idx_mat]
+
+    #%% Determine number of samples, rows, and columns
     N = np.size(eeg_raw,0)  # Number of samples [N]
     M = np.size(idx_mat,0)  # Number of rows in index matrix [N]
     K = np.size(idx_mat,1)  # Number of columns in index matrix [N]
@@ -360,10 +374,11 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     #%% Perform Kmeans classification
     kmeans = KMeans(n_clusters=n_clusters).fit(eeg_features.T)
 
+    #%% Compute decomposed matrices
     # - Preallocate variables
     eeg_component = np.zeros((n_clusters, N))
 
-    #%% Compute decomposed matrices
+    # - Calculate EEG component for each cluster
     for cluster in range(n_clusters):
         eeg_decomposed = np.zeros((M,K))    # Temporary matrix to store the decomposed EEG for each cluster [M,K] 
         
@@ -374,7 +389,7 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
         # Reconstruct signal from antidiagonal averages
         eeg_component[cluster, :] = mean_antidiag(eeg_decomposed, antidiag_method)
         
-    #%% Calculate Fractal Dimension (FD)        
+    #%% Fractal Dimension (FD)        
     # - Normalize EEG to unit square
     x_norm = np.repeat(np.reshape(np.linspace(0, 1, N),[-1,1]),n_clusters,axis=1)
     y_num = eeg_component - matlib.repmat(np.amin(eeg_component, axis=1, keepdims=True), 1, N)
@@ -385,7 +400,7 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     # - Calculate fractal dimension
     # l = np.sum(np.sum(np.abs(np.diff(z, axis=1)), axis=0), axis=0)  # Calculate length of signal (l1-norm for each n_cluster) [A.U.]
     l = np.sum(np.sqrt(np.sum(np.square(np.diff(z, axis=1)), axis=0)), axis=0)  # Calculate length of signal (l2-norm for each n_cluster) [A.U.]
-    fd = 1 + (np.log(l) / np.log(2*(N-1)))
+    fd = 1 + (np.log(l) / np.log(2*(N-1)))  # Fractal dimension value
 
     # - Binary artifact creation
     fd_mask = fd < fd_threshold                         # Apply threshold to FD to determine artifact components
@@ -427,9 +442,9 @@ def mean_antidiag(input_mat, method):
                 Must be a 2D matrix.
             method: str
                 Method used to calculate average of antidiagonals
-                'simple': Iterate through each antidiagonal and calculate mean value
                 'mask': Compute matrix with antidiagonals and boolean mask, calculate mean of matrix
-
+                'simple': Iterate through each antidiagonal and calculate mean value
+                
         Returns
         -------
             average_vect: array_like
@@ -438,7 +453,7 @@ def mean_antidiag(input_mat, method):
 
     input_shape = input_mat.shape       # Shape of input matrix
     input_flip = np.fliplr(input_mat)   # Flip input matrix from left to right
-    n = np.sum(input_shape) - 1             # Number of samples of resulting vector 
+    n = np.sum(input_shape) - 1         # Number of samples of resulting vector 
 
     # Make sure that input matrix is 2D
     if len(input_shape)!=2:
@@ -502,3 +517,73 @@ def mean_antidiag_gpu(input_mat_cp, N):
         average_vect[-i_diag-1] = cp.mean(cp.diag(input_flip, k=k_diag))
 
     return average_vect
+
+def multithread(eeg_raw, idx_mat, n_clusters, fd_threshold, ssa_threshold, svd_method, antidiag_method):
+    """
+    This function calls the single_remove_eyeblinks function and parallelizes the code in multiple threads
+
+    Parameters
+    ----------
+        eeg_raw: array_like 
+            2D multiple channel raw EEG data to be cleaned [channels, samples]
+        idx_mat: array_like
+            Matrix with the indices to build the embedded matrix.
+        n_clusters: int, optional
+            Number of clusters to use in the kmeans classifier
+        fd_threshold: float, optional
+            Fractal dimension threshold 
+        ssa_threshold: float, optional
+            Singular Spectrum Analysis threshold
+        svd_method: str, optional
+            Method to use for SVD calculation
+            'sci': Scipy
+            'np': Numpy
+        method: str
+            Method used to calculate average of antidiagonals
+            'mask': Compute matrix with antidiagonals and boolean mask, calculate mean of matrix
+            'simple': Iterate through each antidiagonal and calculate mean value     
+
+    Returns
+    -------
+        average_vect: array_like
+            1D vector containing the mean values of the antidiagonal components
+
+    Notes
+    -----
+        The paralellization is affected by Python's GIL, there might not be any speed benefits of using this function.
+    """
+    #%% Setup
+    # - Determine number of channels    
+    n_channels = np.size(eeg_raw, axis=0)
+
+    # - Preallocate variables
+    artifact = np.zeros_like(eeg_raw)
+    eeg_list = [None] * n_channels
+    idx_mat_list = [None] * n_channels
+    
+    # - Organize input variables as lists
+    for i in range(n_channels):
+        eeg_list[i] = eeg_raw[i,:]
+        idx_mat_list[i] = idx_mat
+
+    svd_list = [svd_method] * n_channels
+    antidiag_list = [antidiag_method] * n_channels
+    n_clusters_list = [n_clusters] * n_channels
+    fd_threshold_list = [fd_threshold] * n_channels
+    ssa_threshold_list = [ssa_threshold] * n_channels
+
+    # Use ThreadPoolExecutor to parallelize the code
+    # - Determine number of CPUs (threads)
+    total_cpus = os.cpu_count()
+    n_workers = np.floor(total_cpus/2).astype(int)
+    
+    i = 0   # Initialize counter for channel
+    with cf.ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for m_results in executor.map(single_remove_eyeblinks, eeg_list, idx_mat_list, n_clusters_list, fd_threshold_list, ssa_threshold_list, svd_list, antidiag_list):
+            artifact[i,:] = m_results
+            i += 1
+            # multithread_results = executor.map(single_remove_eyeblinks, eeg_list, idx_mat_list, n_clusters_list, fd_threshold_list, ssa_threshold_list, svd_list, antidiag_list) 
+            # executor_done = cf.Future.done()
+            # print(f'Done = {executor_done}')
+
+    return artifact
