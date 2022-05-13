@@ -142,25 +142,26 @@ def remove_eyeblinks_cpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
 
     #%% Decomposed 
     # - Preallocate variables
-    artifact = np.zeros_like(eeg_raw)           # Artifact signal (after SSA)
+    eeg_clean = np.zeros_like(eeg_raw)           # Artifact signal (after SSA)
+    artifact_found = np.zeros(n_channels)
+    saturation_found = np.zeros(n_channels)
 
     #%% Run Artifact removal in each channel
     # - Multithreaded enabled
     if enable_multithread:
-        artifact = multithread(eeg_raw, idx_mat, n_clusters, fd_threshold, ssa_threshold, svd_method, antidiag_method)
+        [eeg_clean, _] = multithread(eeg_raw, idx_mat, n_clusters, fd_threshold, ssa_threshold, svd_method, antidiag_method)
 
     # - Multithread disabled
     else:
         for channel in range(n_channels):
-            artifact[channel,:] = single_remove_eyeblinks(eeg_raw=eeg_raw[channel,:], idx_mat=idx_mat, svd_method=svd_method, antidiag_method=antidiag_method)
+            [eeg_clean[channel,:], artifact_found[channel], saturation_found[channel]] = single_remove_eyeblinks(eeg_raw=eeg_raw[channel,:], 
+            idx_mat=idx_mat, svd_method=svd_method, antidiag_method=antidiag_method)
 
-    eeg_clean = eeg_raw - artifact
-    
     #%% Return data in original shape
     if data_reshape:
-        return eeg_clean.T, artifact.T
+        return eeg_clean.T, artifact_found, saturation_found
     else:
-        return eeg_clean, artifact
+        return eeg_clean, artifact_found, saturation_found
 
 #%% Remove Eyeblinks - Multiple channels using GPU
 def remove_eyeblinks_gpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01):
@@ -174,13 +175,13 @@ def remove_eyeblinks_gpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
             Raw EEG data to be cleaned
         srate: int or float
             Sampling rate of the raw EEG signal [Hz]
-        window_lenght: float or int, optional
+        window_length: float or int, optional
             Length of window used to create the SSA matrix 
             If window_length.type() == float : window_length must be in msec 
             If window_length.type() == int: window_length is the number of sample points
         fd_threshold: float, optional
             Fractal dimension threshold 
-        ssa_threshold: floar, optional
+        ssa_threshold: float, optional
             Singular Spectrum Analysis threshold
 
     Returns
@@ -342,6 +343,10 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     -------
         artifact: array like
             Single artifacts vector found in EEG signal
+        artifact_found: boolean
+            Boolean to determine wether there were artifacts detected
+        saturation_found: boolean
+            Boolean to determin wether the signal hit one of the rails (clipping)
     """
 
     #%% Create EEG embedded matrix from single row of EEG
@@ -358,6 +363,15 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     f3 = stats.kurtosis(eeg_embedded, axis=0)       # Kurtosis
     f4 = eeg_embedded.max(0) - eeg_embedded.min(0)  # Range
     eeg_features = np.array((f1,f2,f3,f4))
+
+    #%% Replace NaN values
+    # - This can happen when the data clips, usually the variance will be 0
+    #   this can cause issues when performing the kmeans classification
+    # - If this happens, the window is unusable for further classification. Return 0 data 
+    if np.any(np.isnan(eeg_features)):
+       artifact_found = False
+       saturation_found = True
+       return np.zeros_like(eeg_raw), artifact_found, saturation_found
 
     #%% Perform Kmeans classification
     kmeans = KMeans(n_clusters=n_clusters).fit(eeg_features.T)
@@ -392,6 +406,16 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
 
     # - Binary artifact creation
     fd_mask = fd < fd_threshold                         # Apply threshold to FD to determine artifact components
+
+    #&& No artifacts found
+    # - Return original data
+    if not fd_mask.any():
+        artifact_found = False
+        saturation_found = False
+        return eeg_raw, artifact_found, saturation_found
+
+    artifact_found = True                               # Flag to know that artifacts were found
+    saturation_found = False                            # Flag to know the channel hit the rail
     eeg_mask = np.sum(eeg_component[fd_mask,:],0)       # Vector with artifact points != 0
     eeg_artifact = eeg_raw*(eeg_mask != 0).astype(int)  # Multiply mask with original to get eeg_artifact with correct values [V]
 
@@ -404,20 +428,23 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
         [u, s, vh] = linalg.svd(artifact_embedded, full_matrices=False)
         pass
     elif svd_method == 'np':
-        [u, s, vh] = np.linalg.svd(artifact_embedded)
+        [u, s, vh] = np.linalg.svd(artifact_embedded, full_matrices=False)
     else:
         print("wrong SVD method selected")
         return None
 
     # - Determine number of groups
-    eigen_ratio = (s / s.sum()) > ssa_threshold   # Keep only eigenvectors > ssa_threshold
-    vh_sub = vh[0:s.size]                           # Select subset of unitary arrays
-    artifact_sub = u[:,eigen_ratio] @ np.diag(s[eigen_ratio]) @ vh_sub[eigen_ratio,:]   # Artifact with subset of eigenvectors
-    
+    eigen_ratio = (s / s.sum()) > ssa_threshold # Keep only eigenvectors > ssa_threshold
+    # vh_sub = vh[0:s.size]                       # Select subset of unitary arrays
+    # artifact_sub = u[:,eigen_ratio] @ np.diag(s[eigen_ratio]) @ vh_sub[eigen_ratio,:]   # Artifact with subset of eigenvectors
+    artifact_sub = u[:,eigen_ratio] @ np.diag(s[eigen_ratio]) @ vh[eigen_ratio,:]   # Artifact with subset of eigenvectors
+
     # Reconstruct signals from antidiagonal averages
     artifact = mean_antidiag(artifact_sub, antidiag_method)
 
-    return artifact
+    eeg_clean = eeg_raw - artifact
+
+    return eeg_clean, artifact_found, saturation_found
 
 def mean_antidiag(input_mat, method):
     """
