@@ -84,7 +84,7 @@ def mat_to_npz(file, save_file=False, save_loc='Data\\Imported', save_name=''):
     return npz
 
 #%% edf_to_npz
-def edf_to_npz(eeg_file, labels_file, save_file=False, save_loc='Data\\Imported', save_name=''):
+def edf_to_npz(eeg_file, labels_file, save_file=False, save_loc='Data\\Imported', save_name='', resample=True, new_srate=250):
     """
     Import an .edf file and convert it to an .npz file. Meant to be used with the Temple University dataset
 
@@ -100,6 +100,10 @@ def edf_to_npz(eeg_file, labels_file, save_file=False, save_loc='Data\\Imported'
             Relative path of the saved data. Only necessary if save_file == True 
         save_name: str, optional
             Name of the data file to be saved. Only necessary if save_file == True
+        resample: bool, optional
+            Resample data to resample_f
+        new_srate: int, optional
+            Resample frequency in Hz
 
     Returns
     -------
@@ -130,12 +134,12 @@ def edf_to_npz(eeg_file, labels_file, save_file=False, save_loc='Data\\Imported'
         labels_file = labels_file + '.csv'
 
     # Import EEG data
-    edf_data = mne.io.read_raw_edf(eeg_file)
+    edf_data = mne.io.read_raw_edf(eeg_file, verbose=False)
     eeg = edf_data.get_data()  # EEG [V]
 
     # - Transpose EEG data to have channels as columns
     [a, b] = np.shape(eeg)
-    if b > a:
+    if a > b:
         eeg = eeg.T
 
     # - Extra information
@@ -147,20 +151,17 @@ def edf_to_npz(eeg_file, labels_file, save_file=False, save_loc='Data\\Imported'
         t_chan = t_chan.replace('-REF','')
         chans[c] = t_chan
 
-
-    # Resample data to new sample rate
-    new_srate = 250    # [Hz]
-
-    # - Original data
+    # Original data sampling rate
     l_oeeg = len(eeg)   # Length of original EEG [n]
-    eeg = signal.resample(eeg, int((l_oeeg*new_srate)/srate)) # Resampled data
+    time = np.linspace(0, l_oeeg/srate, l_oeeg) # Original time vector
 
-    # - Resampled data
-    l_neeg = len(eeg)   # Length of new EEG signal [n]
-    time = np.linspace(0, l_neeg/new_srate, l_neeg)   # New time vector
-    srate = new_srate # New sampling rate [Hz]
-
-
+    # Resample data
+    if resample: 
+        srate = new_srate
+        eeg = signal.resample(eeg, int((l_oeeg*new_srate)/srate)) # Resampled data
+        l_neeg = len(eeg)   # Length of new EEG signal [n]
+        time = np.linspace(0, l_neeg/new_srate, l_neeg)   # New time vector
+    
     # Artifact annotations
     full_artifact_notes = pd.read_csv(labels_file, header=4)
     file_key = eeg_file.split('\\')[-1].split('.')[0]   # Get only file name [str]

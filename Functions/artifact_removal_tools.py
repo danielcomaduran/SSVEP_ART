@@ -7,6 +7,7 @@
 
 ## Import libraries
 import os
+from matplotlib.pyplot import axis
 import numpy as np
 import scipy.stats as stats
 import scipy.linalg as linalg
@@ -314,7 +315,7 @@ def remove_eyeblinks_gpu(eeg_raw, srate, window_length = 125, n_clusters = 4, fd
     else:
         return cp.asnumpy(eeg_clean), cp.asnumpy(artifact)
 
-def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, svd_method = 'sci', antidiag_method = 'mask'):
+def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4, ssa_threshold = 0.01, var_tol=1e-15, svd_method = 'sci', antidiag_method = 'mask'):
     """
         This function implements the artifact removal described in [Maddirala & Veluvolu 2021].
 
@@ -368,7 +369,8 @@ def single_remove_eyeblinks(eeg_raw, idx_mat, n_clusters = 4, fd_threshold = 1.4
     # - This can happen when the data clips, usually the variance will be 0
     #   this can cause issues when performing the kmeans classification
     # - If this happens, the window is unusable for further classification. Return 0 data 
-    if np.any(np.isnan(eeg_features)):
+    if np.any(eeg_embedded.var(axis=0) < var_tol):
+    # if np.any(np.isnan(eeg_features)):
        artifact_found = False
        saturation_found = True
        return np.zeros_like(eeg_raw), artifact_found, saturation_found
